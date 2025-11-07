@@ -12,123 +12,201 @@ const Appointment = () => {
     const { doctors, currencySymbol, backendUrl, token, getDoctosData } = useContext(AppContext)
     const daysOfWeek = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT']
 
-    const [docInfo, setDocInfo] = useState(false)
-    const [docSlots, setDocSlots] = useState([])
+    const [docInfo, setDocInfo] = useState(null)
+    const [docSlots, setDocSlots] = useState([]) // array of arrays (each day -> slot objects)
     const [slotIndex, setSlotIndex] = useState(0)
     const [slotTime, setSlotTime] = useState('')
 
     const navigate = useNavigate()
 
     const fetchDocInfo = async () => {
-        const docInfo = doctors.find((doc) => doc._id === docId)
-        setDocInfo(docInfo)
+        const doc = doctors.find((d) => d._id === docId)
+        setDocInfo(doc || null)
     }
 
-    const getAvailableSolts = async () => {
+    // Robust helper: check both ISO (YYYY-MM-DD) and underscore (D_M_YYYY) keys
+    const getBookedCountFor = (slots_booked = {}, dateObj, slotTime) => {
+        // iso: 2025-11-07
+        const year = dateObj.getFullYear()
+        const month = (dateObj.getMonth() + 1).toString().padStart(2, '0')
+        const day = dateObj.getDate().toString().padStart(2, '0')
+        const isoKey = `${year}-${month}-${day}`
 
+        // underscore: 7_11_2025 (note: not zero padded)
+        const underscoreKey = `${dateObj.getDate()}_${dateObj.getMonth() + 1}_${dateObj.getFullYear()}`
+
+        let bookedCount = 0
+        if (slots_booked[isoKey] && slots_booked[isoKey][slotTime]) {
+            bookedCount = slots_booked[isoKey][slotTime].length
+        } else if (slots_booked[underscoreKey] && slots_booked[underscoreKey][slotTime]) {
+            bookedCount = slots_booked[underscoreKey][slotTime].length
+        }
+        return bookedCount
+    }
+
+    // Generate available slots: 9 AM - 7 PM, 1-hour intervals, max 10 people per slot, 30 days booking window
+    const getAvailableSolts = () => {
         setDocSlots([])
 
-        // getting current date
-        let today = new Date()
+        if (!docInfo) return
 
-        for (let i = 0; i < 7; i++) {
+        // Valid time slots (9 AM - 7 PM)
+        const validSlots = [
+            "09:00 AM", "10:00 AM", "11:00 AM", "12:00 PM",
+            "01:00 PM", "02:00 PM", "03:00 PM", "04:00 PM",
+            "05:00 PM", "06:00 PM", "07:00 PM"
+        ]
 
-            // getting date with index 
-            let currentDate = new Date(today)
+        const today = new Date()
+
+        const newDocSlots = []
+
+        // Generate slots for next 30 days (i from 0 to 29)
+        for (let i = 0; i < 30; i++) {
+            const currentDate = new Date(today)
             currentDate.setDate(today.getDate() + i)
+            currentDate.setHours(0, 0, 0, 0)
 
-            // setting end time of the date with index
-            let endTime = new Date()
-            endTime.setDate(today.getDate() + i)
-            endTime.setHours(21, 0, 0, 0)
+            const timeSlots = []
 
-            // setting hours 
-            if (today.getDate() === currentDate.getDate()) {
-                currentDate.setHours(currentDate.getHours() > 10 ? currentDate.getHours() + 1 : 10)
-                currentDate.setMinutes(currentDate.getMinutes() > 30 ? 30 : 0)
-            } else {
-                currentDate.setHours(10)
-                currentDate.setMinutes(0)
-            }
+            for (let slotTimeVal of validSlots) {
+                // get booked count using robust helper
+                const bookedCount = getBookedCountFor(docInfo.slots_booked || {}, currentDate, slotTimeVal)
+                const isSlotAvailable = bookedCount < 10
 
-            let timeSlots = [];
+                // Only show slots for current day if time hasn't passed
+                if (i === 0) {
+                    const now = new Date()
+                    const [timePart, modifier] = slotTimeVal.split(' ')
+                    let [hours, minutes] = timePart.split(':')
 
+                    hours = parseInt(hours, 10)
+                    minutes = parseInt(minutes, 10)
 
-            while (currentDate < endTime) {
-                let formattedTime = currentDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                    if (modifier === 'PM' && hours !== 12) {
+                        hours += 12
+                    }
+                    if (modifier === 'AM' && hours === 12) {
+                        hours = 0
+                    }
 
-                let day = currentDate.getDate()
-                let month = currentDate.getMonth() + 1
-                let year = currentDate.getFullYear()
+                    const slotDateTime = new Date(currentDate)
+                    slotDateTime.setHours(hours, minutes, 0, 0)
 
-                const slotDate = day + "_" + month + "_" + year
-                const slotTime = formattedTime
-
-                const isSlotAvailable = docInfo.slots_booked[slotDate] && docInfo.slots_booked[slotDate].includes(slotTime) ? false : true
-
-                if (isSlotAvailable) {
-
-                    // Add slot to array
-                    timeSlots.push({
-                        datetime: new Date(currentDate),
-                        time: formattedTime
-                    })
+                    if (slotDateTime <= now) {
+                        // skip this slot (already passed)
+                        continue
+                    }
                 }
 
-                // Increment current time by 30 minutes
-                currentDate.setMinutes(currentDate.getMinutes() + 30);
+                if (isSlotAvailable) {
+                    timeSlots.push({
+                        datetime: new Date(currentDate), // full date object
+                        time: slotTimeVal,
+                        available: 10 - bookedCount // remaining slots
+                    })
+                }
             }
 
-            setDocSlots(prev => ([...prev, timeSlots]))
-
+            if (timeSlots.length > 0) {
+                newDocSlots.push(timeSlots)
+            }
         }
 
+        setDocSlots(newDocSlots)
+        // reset selected slot index/time if out of range
+        if (slotIndex >= newDocSlots.length) {
+            setSlotIndex(0)
+            setSlotTime('')
+        }
     }
 
     const bookAppointment = async () => {
-
         if (!token) {
             toast.warning('Login to book appointment')
             return navigate('/login')
         }
 
+        if (!slotTime) {
+            return toast.warning('Please select a time slot')
+        }
+
+        // guard: ensure slotIndex and docSlots exist
+        if (!docSlots || !docSlots[slotIndex] || !docSlots[slotIndex][0]) {
+            return toast.error('Selected slot date is invalid. Please reselect.')
+        }
+
         const date = docSlots[slotIndex][0].datetime
+        const day = date.getDate()
+        const month = date.getMonth() + 1
+        const year = date.getFullYear()
 
-        let day = date.getDate()
-        let month = date.getMonth() + 1
-        let year = date.getFullYear()
-
-        const slotDate = day + "_" + month + "_" + year
+        // Format date as YYYY-MM-DD (ISO) to send to backend
+        const slotDate = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`
 
         try {
+            const { data } = await axios.post(
+                backendUrl + '/api/user/book-appointment',
+                { docId, slotDate, slotTime },
+                { headers: { token } }
+            )
 
-            const { data } = await axios.post(backendUrl + '/api/user/book-appointment', { docId, slotDate, slotTime }, { headers: { token } })
             if (data.success) {
                 toast.success(data.message)
-                getDoctosData()
+
+                // optimistic UI update: decrement available count for selected slot immediately
+                setDocSlots(prev => {
+                    const clone = prev.map(daySlots => daySlots.map(slot => ({ ...slot })))
+                    // ensure slotIndex still valid
+                    if (clone[slotIndex]) {
+                        const found = clone[slotIndex].find(s => s.time === slotTime)
+                        if (found) {
+                            found.available = Math.max(0, found.available - 1)
+                            // if available becomes 0, you may want to remove the slot or leave it (we'll leave it with 0 visible)
+                        }
+                    }
+                    return clone
+                })
+
+                // refresh global doctors (keeps backend and other components in sync)
+                await getDoctosData()
+
+                // navigate to appointments after a short success message
                 navigate('/my-appointments')
             } else {
                 toast.error(data.message)
             }
-
         } catch (error) {
             console.log(error)
-            toast.error(error.message)
+            toast.error(error?.response?.data?.message || error.message || 'Booking failed')
         }
-
     }
 
+    // When global doctors array changes, update docInfo
     useEffect(() => {
-        if (doctors.length > 0) {
-            fetchDocInfo()
+        if (doctors && doctors.length > 0) {
+            const updated = doctors.find(d => d._id === docId)
+            setDocInfo(updated || null)
         }
     }, [doctors, docId])
 
+    // When docInfo changes, (re)generate slots
     useEffect(() => {
         if (docInfo) {
             getAvailableSolts()
+        } else {
+            setDocSlots([])
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [docInfo])
+
+    // Initial load: set docInfo when component mounts and doctors are present
+    useEffect(() => {
+        if (doctors && doctors.length > 0) {
+            fetchDocInfo()
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [doctors, docId])
 
     return docInfo ? (
         <div>
@@ -161,10 +239,19 @@ const Appointment = () => {
 
             {/* Booking slots */}
             <div className='sm:ml-72 sm:pl-4 mt-8 font-medium text-[#565656]'>
-                <p >Booking slots</p>
+                <p>Booking slots</p>
+                <p className='text-sm text-gray-500 mt-1'>Available for the next 30 days • 9:00 AM - 7:00 PM • Max 10 people per slot</p>
+
                 <div className='flex gap-3 items-center w-full overflow-x-scroll mt-4'>
-                    {docSlots.length && docSlots.map((item, index) => (
-                        <div onClick={() => setSlotIndex(index)} key={index} className={`text-center py-6 min-w-16 rounded-full cursor-pointer ${slotIndex === index ? 'bg-primary text-white' : 'border border-[#DDDDDD]'}`}>
+                    {docSlots.length > 0 && docSlots.map((item, index) => (
+                        <div
+                            onClick={() => {
+                                setSlotIndex(index)
+                                setSlotTime('') // reset time selection when switching day
+                            }}
+                            key={index}
+                            className={`text-center py-6 min-w-16 rounded-full cursor-pointer ${slotIndex === index ? 'bg-primary text-white' : 'border border-[#DDDDDD]'}`}
+                        >
                             <p>{item[0] && daysOfWeek[item[0].datetime.getDay()]}</p>
                             <p>{item[0] && item[0].datetime.getDate()}</p>
                         </div>
@@ -172,15 +259,22 @@ const Appointment = () => {
                 </div>
 
                 <div className='flex items-center gap-3 w-full overflow-x-scroll mt-4'>
-                    {docSlots.length && docSlots[slotIndex].map((item, index) => (
-                        <p onClick={() => setSlotTime(item.time)} key={index} className={`text-sm font-light  flex-shrink-0 px-5 py-2 rounded-full cursor-pointer ${item.time === slotTime ? 'bg-primary text-white' : 'text-[#949494] border border-[#B4B4B4]'}`}>{item.time.toLowerCase()}</p>
+                    {docSlots.length > 0 && docSlots[slotIndex] && docSlots[slotIndex].map((item, index) => (
+                        <div key={index} onClick={() => setSlotTime(item.time)} className='flex flex-col'>
+                            <p className={`text-sm font-light flex-shrink-0 px-5 py-2 rounded-full cursor-pointer ${item.time === slotTime ? 'bg-primary text-white' : 'text-[#949494] border border-[#B4B4B4]'}`}>
+                                {item.time.toLowerCase()}
+                            </p>
+                            <p className='text-xs text-gray-500 text-center mt-1'>
+                                {item.available} slots left
+                            </p>
+                        </div>
                     ))}
                 </div>
 
                 <button onClick={bookAppointment} className='bg-primary text-white text-sm font-light px-20 py-3 rounded-full my-6'>Book an appointment</button>
             </div>
 
-            {/* Listing Releated Doctors */}
+            {/* Listing Related Doctors */}
             <RelatedDoctors speciality={docInfo.speciality} docId={docId} />
         </div>
     ) : null

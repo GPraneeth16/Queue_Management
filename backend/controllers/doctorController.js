@@ -38,6 +38,22 @@ const appointmentsDoctor = async (req, res) => {
         const { docId } = req.body
         const appointments = await appointmentModel.find({ docId })
 
+        // Add queue position information for each appointment
+        const doctor = await doctorModel.findById(docId)
+
+        for (let appointment of appointments) {
+            if (!appointment.cancelled && doctor && doctor.slots_booked[appointment.slotDate]) {
+                const slotBookings = doctor.slots_booked[appointment.slotDate][appointment.slotTime] || []
+                
+                const appointmentIdStr = appointment._id.toString()
+                const position = slotBookings.indexOf(appointmentIdStr)
+                
+                appointment._doc.queuePosition = position !== -1 ? position + 1 : 1
+                appointment._doc.peopleAhead = position !== -1 ? position : 0
+                appointment._doc.totalInSlot = slotBookings.length
+            }
+        }
+
         res.json({ success: true, appointments })
 
     } catch (error) {
@@ -55,10 +71,32 @@ const appointmentCancel = async (req, res) => {
         const appointmentData = await appointmentModel.findById(appointmentId)
         if (appointmentData && appointmentData.docId === docId) {
             await appointmentModel.findByIdAndUpdate(appointmentId, { cancelled: true })
+            
+            // Update doctor's slots_booked to remove cancelled appointment
+            const { slotDate, slotTime } = appointmentData
+            const doctorData = await doctorModel.findById(docId)
+            let slots_booked = doctorData.slots_booked
+
+            if (slots_booked[slotDate] && slots_booked[slotDate][slotTime]) {
+                slots_booked[slotDate][slotTime] = slots_booked[slotDate][slotTime]
+                    .filter(id => id !== appointmentId.toString())
+                
+                // Clean up empty arrays/objects
+                if (slots_booked[slotDate][slotTime].length === 0) {
+                    delete slots_booked[slotDate][slotTime]
+                }
+                
+                if (Object.keys(slots_booked[slotDate]).length === 0) {
+                    delete slots_booked[slotDate]
+                }
+            }
+
+            await doctorModel.findByIdAndUpdate(docId, { slots_booked })
+            
             return res.json({ success: true, message: 'Appointment Cancelled' })
         }
 
-        res.json({ success: false, message: 'Appointment Cancelled' })
+        res.json({ success: false, message: 'Appointment not found' })
 
     } catch (error) {
         console.log(error)
@@ -76,10 +114,32 @@ const appointmentComplete = async (req, res) => {
         const appointmentData = await appointmentModel.findById(appointmentId)
         if (appointmentData && appointmentData.docId === docId) {
             await appointmentModel.findByIdAndUpdate(appointmentId, { isCompleted: true })
+            
+            // Update doctor's slots_booked to remove completed appointment
+            const { slotDate, slotTime } = appointmentData
+            const doctorData = await doctorModel.findById(docId)
+            let slots_booked = doctorData.slots_booked
+
+            if (slots_booked[slotDate] && slots_booked[slotDate][slotTime]) {
+                slots_booked[slotDate][slotTime] = slots_booked[slotDate][slotTime]
+                    .filter(id => id !== appointmentId.toString())
+                
+                // Clean up empty arrays/objects
+                if (slots_booked[slotDate][slotTime].length === 0) {
+                    delete slots_booked[slotDate][slotTime]
+                }
+                
+                if (Object.keys(slots_booked[slotDate]).length === 0) {
+                    delete slots_booked[slotDate]
+                }
+            }
+
+            await doctorModel.findByIdAndUpdate(docId, { slots_booked })
+            
             return res.json({ success: true, message: 'Appointment Completed' })
         }
 
-        res.json({ success: false, message: 'Appointment Cancelled' })
+        res.json({ success: false, message: 'Appointment not found' })
 
     } catch (error) {
         console.log(error)

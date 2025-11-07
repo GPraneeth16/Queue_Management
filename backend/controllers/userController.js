@@ -37,7 +37,7 @@ const registerUser = async (req, res) => {
         }
 
         // hashing user password
-        const salt = await bcrypt.genSalt(10); // the more no. round the more time it will take
+        const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt)
 
         const userData = {
@@ -130,12 +130,54 @@ const updateProfile = async (req, res) => {
     }
 }
 
+// Helper function to validate booking date (within 30 days from today)
+const isValidBookingDate = (slotDate) => {
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    
+    const bookingDate = new Date(slotDate)
+    bookingDate.setHours(0, 0, 0, 0)
+    
+    const thirtyDaysFromNow = new Date(today)
+    thirtyDaysFromNow.setDate(today.getDate() + 30)
+    
+    return bookingDate >= today && bookingDate <= thirtyDaysFromNow
+}
+
+// Helper function to validate slot time (9 AM - 7 PM, 1-hour slots)
+const isValidSlotTime = (slotTime) => {
+    const validSlots = [
+        "09:00 AM", "10:00 AM", "11:00 AM", "12:00 PM",
+        "01:00 PM", "02:00 PM", "03:00 PM", "04:00 PM",
+        "05:00 PM", "06:00 PM", "07:00 PM"
+    ]
+    return validSlots.includes(slotTime)
+}
+
 // API to book appointment 
 const bookAppointment = async (req, res) => {
 
     try {
 
         const { userId, docId, slotDate, slotTime } = req.body
+        console.log(req.body)
+
+        // Validate booking date (within 30 days)
+        if (!isValidBookingDate(slotDate)) {
+            return res.json({ 
+                success: false, 
+                message: 'Appointments can only be booked within 30 days from today' 
+            })
+        }
+
+        // Validate slot time (9 AM - 7 PM)
+        if (!isValidSlotTime(slotTime)) {
+            return res.json({ 
+                success: false, 
+                message: 'Invalid slot time. Please select a slot between 9:00 AM and 7:00 PM' 
+            })
+        }
+
         const docData = await doctorModel.findById(docId).select("-password")
 
         if (!docData.available) {
@@ -144,28 +186,42 @@ const bookAppointment = async (req, res) => {
 
         let slots_booked = docData.slots_booked
 
-        // checking for slot availablity 
-        if (slots_booked[slotDate]) {
-            if (slots_booked[slotDate].includes(slotTime)) {
-                return res.json({ success: false, message: 'Slot Not Available' })
-            }
-            else {
-                slots_booked[slotDate].push(slotTime)
-            }
-        } else {
-            slots_booked[slotDate] = []
-            slots_booked[slotDate].push(slotTime)
+        // Initialize date object if it doesn't exist
+        if (!slots_booked[slotDate]) {
+            slots_booked[slotDate] = {}
+        }
+
+        // Initialize slot array if it doesn't exist
+        if (!slots_booked[slotDate][slotTime]) {
+            slots_booked[slotDate][slotTime] = []
+        }
+
+        // Check if slot is full (max 10 people per slot)
+        if (slots_booked[slotDate][slotTime].length >= 10) {
+            return res.json({ 
+                success: false, 
+                message: 'Slot is full. Maximum 10 appointments per slot.' 
+            })
         }
 
         const userData = await userModel.findById(userId).select("-password")
 
-        delete docData.slots_booked
-
+        // Create appointment data
         const appointmentData = {
             userId,
             docId,
             userData,
-            docData,
+            docData: {
+                name: docData.name,
+                image: docData.image,
+                speciality: docData.speciality,
+                degree: docData.degree,
+                experience: docData.experience,
+                about: docData.about,
+                fees: docData.fees,
+                address: docData.address,
+                _id: docData._id
+            },
             amount: docData.fees,
             slotTime,
             slotDate,
@@ -175,10 +231,18 @@ const bookAppointment = async (req, res) => {
         const newAppointment = new appointmentModel(appointmentData)
         await newAppointment.save()
 
-        // save new slots data in docData
+        // Add appointment ID to the slot (queue system)
+        slots_booked[slotDate][slotTime].push(newAppointment._id.toString())
+
+        // Save updated slots in doctor data
         await doctorModel.findByIdAndUpdate(docId, { slots_booked })
 
-        res.json({ success: true, message: 'Appointment Booked' })
+        res.json({ 
+            success: true, 
+            message: 'Appointment Booked',
+            queuePosition: slots_booked[slotDate][slotTime].length,
+            totalInSlot: slots_booked[slotDate][slotTime].length
+        })
 
     } catch (error) {
         console.log(error)
@@ -208,7 +272,20 @@ const cancelAppointment = async (req, res) => {
 
         let slots_booked = doctorData.slots_booked
 
-        slots_booked[slotDate] = slots_booked[slotDate].filter(e => e !== slotTime)
+        // Remove appointment ID from the slot queue
+        if (slots_booked[slotDate] && slots_booked[slotDate][slotTime]) {
+            slots_booked[slotDate][slotTime] = slots_booked[slotDate][slotTime]
+                .filter(id => id !== appointmentId.toString())
+            
+            // Clean up empty arrays/objects
+            if (slots_booked[slotDate][slotTime].length === 0) {
+                delete slots_booked[slotDate][slotTime]
+            }
+            
+            if (Object.keys(slots_booked[slotDate]).length === 0) {
+                delete slots_booked[slotDate]
+            }
+        }
 
         await doctorModel.findByIdAndUpdate(docId, { slots_booked })
 
@@ -226,6 +303,39 @@ const listAppointment = async (req, res) => {
 
         const { userId } = req.body
         const appointments = await appointmentModel.find({ userId })
+
+        // Calculate queue position for each appointment
+        for (let appointment of appointments) {
+            // Only calculate for non-cancelled appointments
+            if (!appointment.cancelled) {
+                try {
+                    const doctor = await doctorModel.findById(appointment.docId)
+                    
+                    if (doctor && doctor.slots_booked[appointment.slotDate]) {
+                        const slotBookings = doctor.slots_booked[appointment.slotDate][appointment.slotTime] || []
+                        
+                        // Find position of current appointment in the queue
+                        const appointmentIdStr = appointment._id.toString()
+                        const position = slotBookings.indexOf(appointmentIdStr)
+                        
+                        // Add queue information to appointment object
+                        appointment._doc.queuePosition = position !== -1 ? position + 1 : 1
+                        appointment._doc.peopleAhead = position !== -1 ? position : 0
+                        appointment._doc.totalInSlot = slotBookings.length
+                    } else {
+                        // Default values if slot data not found
+                        appointment._doc.queuePosition = 1
+                        appointment._doc.peopleAhead = 0
+                        appointment._doc.totalInSlot = 1
+                    }
+                } catch (err) {
+                    console.log('Error calculating queue position:', err)
+                    appointment._doc.queuePosition = 1
+                    appointment._doc.peopleAhead = 0
+                    appointment._doc.totalInSlot = 1
+                }
+            }
+        }
 
         res.json({ success: true, appointments })
 
